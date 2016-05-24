@@ -1,0 +1,11 @@
+*.suo
+*.opensdf
+CNC_Controller.sdf
+*.sln
+*.filters
+CNC_Controller.vcxproj
+*.buildinfo
+Debug/CNC_Controller.ino.elf
+*.hex
+__vm/.CNC_Controller.vsarduino.h
+*.xml
