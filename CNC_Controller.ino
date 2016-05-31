@@ -3,11 +3,13 @@
 
 /*Pin Definitions*/
 const int LEDPin = 13;
-const int ACSPin = A2;
-const int PotPin = A0;
+const int ACSPin = A3;
+const int PotPin = A2;
+const int VFDPin = A0;
+const int AutoVFDPin = 4;
+const int FeedBackPin = 2;
+const int eStopPin = 7;
 const int PWMPin = 9;
-const int AutoPWMPin = 8;
-const int FeedBackPin = 3;
 
 double input, output, setpoint;
 double kp = 0.078, ki = 0.02, kd = 0.000; // 0.0002
@@ -22,8 +24,7 @@ int counter = 0;
 
 int VQ;
 
-
-bool resetState = 0;
+volatile bool resetState = 0;
 
 static unsigned long bignum = 60000000;
 
@@ -34,6 +35,7 @@ char strAmps[10];
 volatile unsigned long lastTime = 0;
 volatile unsigned long speed = 0;
 volatile unsigned long lastSpeed = 0;
+
 unsigned long resetMillis = 500;
 unsigned long resetProtect = 0;
 
@@ -49,17 +51,20 @@ PID myPID(&input, &output, &setpoint, kp, ki, kd, DIRECT);
 
 void setup(void) {
 
-	pinMode(PWMPin, OUTPUT);
+	pinMode(VFDPin, OUTPUT);
 	pinMode(LEDPin, OUTPUT);
 	pinMode(PotPin, INPUT);
-	pinMode(AutoPWMPin, INPUT_PULLUP);
-
-	Serial.begin(115200);  //Set Serial to decent speed
+	pinMode(AutoVFDPin, INPUT_PULLUP);
+	pinMode(eStopPin, INPUT_PULLUP);
+	pinMode(VFDPin, INPUT);
+	pinMode(PWMPin, OUTPUT);
 
 	myPID.SetMode(AUTOMATIC);
-
-	attachInterrupt(digitalPinToInterrupt(FeedBackPin), countSpin, RISING);
 	// Attach interrupt to feedback sensor on motor
+	attachInterrupt(digitalPinToInterrupt(FeedBackPin), countSpin, RISING);
+	// aTTACH interrupt to stop the motor on E-stop
+	attachInterrupt(digitalPinToInterrupt(eStopPin), shutDown, RISING);  
+
 
 	// assign default color value
 	if (u8g.getMode() == U8G_MODE_R3G3B2) {
@@ -94,8 +99,6 @@ void loop(void) {
 		ulActRPM = 0;
 		lastTime = micros();
 		speed = 0;
-		//Serial.println("no input");
-
 	}
 	else {
 		if (speed > 0) {
@@ -106,14 +109,6 @@ void loop(void) {
 		}
 	}
 
-	//unsigned long now = millis();
-	//kp = (double) (analogRead(A5)*2)/10000;
-	//ki = (double) (analogRead(A4)*2)/100000;
-	//Serial.print("PID: ");
-	//Serial.print(kp, DEC);
-	//Serial.print(", ");
-	//Serial.print(ki, DEC);
-
 	//myPID.SetTunings(kp,ki,kd);
 
 	input = ulActRPM;
@@ -121,7 +116,12 @@ void loop(void) {
 
 	myPID.Compute();
 
-	Serial.println(output);
+	//Serial.println(output);
+
+	// The PID routine gets confused if ULTarget goes to zero with no feedback
+	if (ulTargetRPM == 0) {
+		output = 0;
+	}
 
 	if (resetState) {
 		digitalWrite(PWMPin, LOW);  // If in reset set the pin low to switch off the motor
@@ -129,6 +129,8 @@ void loop(void) {
 	else {
 		analogWrite(PWMPin, output); // Otherwise all is good, set the motor speed (result from the PID routine)
 	}
+
+
 
 	/*
 	The switch routine ensures that we dont do all the non time critical behaviours on
@@ -169,14 +171,24 @@ void loop(void) {
 	counter++;
 }
 
+void shutDown() {
+	resetState = 1;
+	digitalWrite(PWMPin, LOW);  // If in reset set the pin low to switch off the motor
+}
+
 void getTarget() {
-	mode = digitalRead(AutoPWMPin);
-	if (false) {
+	mode = digitalRead(AutoVFDPin);
+	if (mode) {
 		// Calculate the pulse width here
+		int intVFDReading = analogRead(VFDPin);
+	
+			ulTargetRPM = map(intVFDReading, 0, 1024, 0, 14000);
+			ulTargetRPM = (int)(ulTargetRPM / 100) * 100; // Set increments or else the target ends up jumpy and hard to set
 	}
+
 	else {
 		// Map the reading from Analog 0
-		int intPotReading = analogRead(A0);
+		int intPotReading = analogRead(PotPin);
 		if (intPotReading < 950) {
 			ulTargetRPM = map(intPotReading, 0, 950, 14000, 4000);
 			ulTargetRPM = (int)(ulTargetRPM / 100) * 100; // Set increments or else the target ends up jumpy and hard to set
@@ -207,7 +219,7 @@ void countSpin() {
 }
 
 int determineVQ(int PIN) {
-	//Serial.print("estimating avg. quiscent voltage:");
+	// estimating avg. quiscent voltage
 	long VQ = 0;
 	//read 5000 samples to stabilise value
 	for (int i = 0; i < 1000; i++) {
@@ -215,7 +227,6 @@ int determineVQ(int PIN) {
 		delay(1);//depends on sampling (on filter capacitor), can be 1/80000 (80kHz) max.
 	}
 	VQ /= 1000;
-	Serial.print(map(VQ, 0, 1023, 0, 5000)); Serial.println(" mV");
 	return int(VQ);
 }
 
@@ -231,10 +242,8 @@ float readCurrent(int PIN) {
 	/*	Check to see if we have too much current, but also that we have not had an upward change in 
 		Target RPM recently*/
 	if (current > (5 * sensitivity) && millis() > resetProtect) {
-		Serial.println("Overload!");
 		resetState = 1;  // Not sure if we will get surges when tool hits the work piece
 	}
-	//Serial.println((double)current/sensitivity, 10);
 	return float(current) / sensitivity;
 }
 
@@ -274,7 +283,7 @@ void draw(void) {
 
 	u8g.drawStr(0, 62, "Mode:");
 	if (mode == AUTO) {
-		u8g.drawStr(30, 62, "PID");
+		u8g.drawStr(30, 62, "VFD");
 	}
 	else {
 		u8g.drawStr(29, 62, "Man");
